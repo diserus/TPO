@@ -21,7 +21,7 @@ def setup_driver():
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--ignore-certificate-errors")
     options.add_argument("--ignore-ssl-errors")
-    service = Service("/snap/bin/geckodriver")
+    service = Service("/geckodriver")
 
     driver = webdriver.Firefox(service=service, options=options)
     driver.implicitly_wait(10)
