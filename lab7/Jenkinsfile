@@ -36,7 +36,18 @@ pipeline {
                 sh 'apt install -y python3-pytest'
                 sh 'apt install -y python3-selenium'
                 sh 'apt install -y python3-requests'
-                sh 'apt-get install -y firefox geckodriver'
+                sh '''apt-get update
+                    apt-get install -y wget curl ca-certificates
+                    apt-get install -y firefox-esr || true   
+
+                    GECKO_VERSION=$(curl -s https://api.github.com/repos/mozilla/geckodriver/releases/latest | \
+                    grep 'tag_name' | cut -d\" -f4)
+                    wget "https://github.com/mozilla/geckodriver/releases/download/$GECKO_VERSION/geckodriver-$GECKO_VERSION-linux64.tar.gz"
+                    tar -xzf "geckodriver-$GECKO_VERSION-linux64.tar.gz"
+                    chmod +x geckodriver
+                    mv geckodriver /usr/local/bin/
+                    rm "geckodriver-$GECKO_VERSION-linux64.tar.gz"
+                    '''
                 catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE'){
                     sh '''cd lab4
                     ls
