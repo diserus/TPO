@@ -1,12 +1,12 @@
 pipeline {
-    agent any
+    agent any                        // общий агент, дальше будет docker внутри каждого stage
     environment {
         ROMULUS_ZIP_URL = "https://jenkins.openbmc.org/job/ci-openbmc/lastSuccessfulBuild/distro=ubuntu,label=docker-builder,target=romulus/artifact/openbmc/build/tmp/deploy/images/romulus/*zip*/romulus.zip"
     }
     stages {
         stage('QEMU (OpenBMC)') {
+            agent { docker { image 'ubuntu:22.04' } }
             steps {
-                echo 'Запуск QEMU'
                 sh '''
                   apt-get update
                   apt-get install -y wget unzip expect qemu-system-arm
@@ -14,6 +14,7 @@ pipeline {
                   wget "$ROMULUS_ZIP_URL" -O romulus.zip
                   unzip -o romulus.zip
                   LATEST_MTD=$(ls romulus/obmc-phosphor-image-romulus-*.static.mtd | sort -V | tail -1)
+
                   expect -c "
                   log_file -a qemu_result.txt
                   spawn qemu-system-arm -m 256 -M romulus-bmc -nographic -drive file=$LATEST_MTD,format=raw,if=mtd -net nic -net user,hostfwd=:0.0.0.0:2222-:22,hostfwd=:0.0.0.0:2443-:443,hostfwd=udp:0.0.0.0:2623-:623,hostname=qemu
@@ -23,18 +24,18 @@ pipeline {
                   send \\"0penBmc\\\\r\\"
                   expect \\"root@romulus:\\"
                   interact" &
+
                   echo $! > qemu.pid
                   sleep 60
                 '''
             }
         }
         stage('Lab4 (Автотесты)') {
+            agent { docker { image 'python:3.10' } }
             steps {
-                echo 'Запуск автотестов'
                 sh '''
-                  apt-get install -y python3
-                  apt install -y python3-pytest
-                  apt install -y python3-requests
+                  pip install --upgrade pip
+                  pip install pytest requests
                   cd lab4
                   pytest -v tests.py | tee ../lab4_results.txt
                   cd ..
@@ -43,16 +44,11 @@ pipeline {
             }
         }
         stage('Lab5 (WebUI Selenium)') {
+            agent { docker { image 'selenium/standalone-firefox:latest' } } // всё нужное уже внутри
             steps {
-                echo 'Запуск WebUI тестов'
                 sh '''
-                  apt install -y python3-pytest
-                  apt install -y python3-selenium
-                  apt install -y python3-requests
-                  wget https://github.com/mozilla/geckodriver/releases/latest/download/geckodriver-linux64.tar.gz
-                  tar -xzf geckodriver-linux64.tar.gz
-                  chmod +x geckodriver
-                  mv geckodriver /usr/local/bin/
+                  pip install --upgrade pip
+                  pip install pytest requests
                   cd lab5
                   pytest -v test_redfish.py | tee ../lab5_results.txt
                   cd ..
@@ -61,11 +57,10 @@ pipeline {
             }
         }
         stage('Lab6 (Locust нагрузка)') {
+            agent { docker { image 'python:3.10' } }
             steps {
-                echo 'Запуск нагрузочных тестов Locust'
                 sh '''
-                  apt install -y python3-locust
-                  apt install -y python3-requests
+                  pip install locust requests
                   cd lab6
                   timeout 180 locust --headless --users 50 --spawn-rate 5 --run-time 2m --host=https://127.0.0.1:2443 | tee ../lab6_results.txt
                   cd ..
@@ -74,6 +69,7 @@ pipeline {
             }
         }
         stage('Stop QEMU и Очистка') {
+            agent { docker { image 'ubuntu:22.04' } }
             steps {
                 sh '''
                   if [ -f "qemu.pid" ]; then
