@@ -1,90 +1,90 @@
 pipeline {
-    agent any 
-    stages{
-        stage('Qemu') {
-            steps{
-                echo 'Start qemu'
-                sh 'rm -rf romulus romulus.zip'
-                sh 'apt update'
-                sh 'apt install -y qemu-system'
-                sh 'apt install -y wget'
-                sh 'apt install -y unzip'
-                sh 'apt install -y expect'
-                sh 'wget https://jenkins.openbmc.org/job/ci-openbmc/lastSuccessfulBuild/distro=ubuntu,label=docker-builder,target=romulus/artifact/openbmc/build/tmp/deploy/images/romulus/*zip*/romulus.zip'
-                sh 'unzip romulus.zip'
-                sh ''' 
-                LATEST_MTD=$(ls romulus/obmc-phosphor-image-romulus-*.static.mtd | sort -V | tail -1)
-                expect -c "
-                log_file -a qemu_result.txt
-                spawn qemu-system-arm -m 256 -M romulus-bmc -nographic -drive file=$LATEST_MTD,format=raw,if=mtd -net nic -net user,hostfwd=:0.0.0.0:2222-:22,hostfwd=:0.0.0.0:2443-:443,hostfwd=udp:0.0.0.0:2623-:623,hostname=qemu
-                sleep 300
-                send "root\r"
-                sleep 4
-                send "0penBmc\r"
-                expect \"root@romulus:\"
-                interact" &
-                QEMU_PID=$!
-                echo "QEMU запущен с PID: $QEMU_PID"
-                echo $QEMU_PID > qemu.pid
+    agent any
+
+    environment {
+        ROMULUS_ZIP_URL = "https://jenkins.openbmc.org/job/ci-openbmc/lastSuccessfulBuild/distro=ubuntu,label=docker-builder,target=romulus/artifact/openbmc/build/tmp/deploy/images/romulus/*zip*/romulus.zip"
+    }
+
+    stages {
+        stage('QEMU (OpenBMC эмуляция)') {
+            agent { docker { image 'ubuntu:22.04' } }
+            steps {
+                echo 'Запуск QEMU'
+                sh '''
+                  apt-get update && apt-get install -y wget unzip expect qemu-system-arm
+                  rm -rf romulus romulus.zip || true
+                  wget "$ROMULUS_ZIP_URL" -O romulus.zip
+                  unzip -o romulus.zip
+                  LATEST_MTD=$(ls romulus/obmc-phosphor-image-romulus-*.static.mtd | sort -V | tail -1)
+
+                  expect -c "
+                  log_file -a qemu_result.txt
+                  spawn qemu-system-arm -m 256 -M romulus-bmc -nographic -drive file=$LATEST_MTD,format=raw,if=mtd -net nic -net user,hostfwd=:0.0.0.0:2222-:22,hostfwd=:0.0.0.0:2443-:443,hostfwd=udp:0.0.0.0:2623-:623,hostname=qemu
+                  sleep 30
+                  send \\"root\\\\r\\"
+                  sleep 4
+                  send \\"0penBmc\\\\r\\"
+                  expect \\"root@romulus:\\"
+                  interact" &
+                  echo $! > qemu.pid
+                  sleep 60
                 '''
             }
         }
-        stage('Auto') {
-            steps{
-                echo 'Start autotests and WebUI tests'
-                sh 'apt install -y python3'
-                sh 'apt install -y python3-pytest'
-                sh 'apt install -y python3-selenium'
-                catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE'){
-                    sh '''cd lab4
-                    ls
-                    python3 -m pytest -v tests.py > web_results.txt 2>&1'''
-                }
-                sh 'cd ..'
-                catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE'){
-                    sh '''cd lab5
-                    ls
-                    python3 -m pytest -v test_redfish.py > autotest_results.txt 2>&1'''
-                }
-                sh 'cd ..'
 
-            }
+        stage('Тесты (lab4, lab5)') {
+            agent { docker { image 'python:3.10' } }
+            steps {
+                echo 'Запуск автотестов и WebUI'
+                sh '''
+                  pip install --upgrade pip
+                  pip install pytest selenium requests
 
-        }
-        
-        stage('Locust') {
-            steps{
-                echo 'Start Locust tests'
-                sh 'apt install -y python3 locust'
-                catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE'){
-                    sh '''cd lab6
-                    ls
-                    timeout 180 locust --headless --users 50 --spawn-rate 5 --run-time 3m --host=https://127.0.0.1:2443 > locust_results.txt 2>&1'''
-                }
-                sh 'cd ..'
+                  cd lab4
+                  pytest -v tests.py | tee ../web_results.txt
+                  cd ../lab5
+                  pytest -v test_redfish.py | tee ../autotest_results.txt
+                  cd ..
+                '''
+                archiveArtifacts artifacts: 'web_results.txt, autotest_results.txt'
             }
         }
-        stage('Stop Qemu') {
+
+        stage('Нагрузочные тесты (lab6)') {
+            agent { docker { image 'python:3.10' } }
+            steps {
+                echo 'Запуск Locust нагрузочных тестов'
+                sh '''
+                  pip install locust
+                  cd lab6
+                  timeout 180 locust --headless --users 50 --spawn-rate 5 --run-time 3m --host=https://127.0.0.1:2443 | tee ../locust_results.txt
+                  cd ..
+                '''
+                archiveArtifacts artifacts: 'locust_results.txt'
+            }
+        }
+
+        stage('Остановка QEMU и очистка') {
+            agent { docker { image 'ubuntu:22.04' } }
             steps {
                 sh '''
-                    echo "Stop Qemu..."
-                    if [ -f "qemu.pid" ]; then
-                        QEMU_PID=$(cat qemu.pid)
-                        kill $QEMU_PID 2>/dev/null || true
-                        rm -f qemu.pid
-                        echo "Qemu shutted down"
-                    fi
-                    rm -rf romulus/ romulus.zip || true
-                    rm -f *.log *.pid *.json *.csv || true
-                    rm -f qemu.pid image_path.txt config.env || true
-                    du -sh . | awk '{print $1}'
+                  echo "Остановить QEMU..."
+                  if [ -f "qemu.pid" ]; then
+                      QEMU_PID=$(cat qemu.pid)
+                      kill $QEMU_PID 2>/dev/null || true
+                      rm -f qemu.pid
+                  fi
+                  rm -rf romulus/ romulus.zip || true
+                  rm -f *.log *.pid *.json *.csv *.txt || true
+                  du -sh . | awk '{print $1}'
                 '''
             }
         }
     }
+
     post {
         always {
             archiveArtifacts artifacts: '**/*.txt', fingerprint: true
-            }
         }
+    }
 }
